@@ -3,9 +3,12 @@ import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 
 const providerPath = process.argv[2];
-const mode = process.argv[3] ?? "recover";
-if (!providerPath || !["recover", "partial-output", "explicit-anchor"].includes(mode)) {
-  console.error("Usage: test-codex-owner-failover.mjs /path/to/openai-codex-responses.js [recover|partial-output|explicit-anchor]");
+const mode = process.argv[3] ?? "server-error";
+const recoveryModes = new Set(["server-error", "top-level-server-error", "rate-limit", "owner-fallback"]);
+const failClosedModes = new Set(["partial-output", "explicit-anchor", "client-error", "stream-incomplete", "operation-in-progress"]);
+const boundedRetryModes = new Set(["repeated-server-error"]);
+if (!providerPath || (![...recoveryModes, ...failClosedModes, ...boundedRetryModes].includes(mode))) {
+  console.error("Usage: test-codex-transient-recovery.mjs PROVIDER [server-error|top-level-server-error|rate-limit|owner-fallback|partial-output|explicit-anchor|client-error|stream-incomplete|operation-in-progress|repeated-server-error]");
   process.exit(2);
 }
 
@@ -38,14 +41,40 @@ class MockWebSocket extends EventTarget {
           item: { id: "msg_partial", type: "message", role: "assistant", status: "in_progress", content: [] }
         });
       }
+      const error = {
+        type: mode === "client-error"
+          ? "invalid_request_error"
+          : mode === "rate-limit"
+            ? "rate_limit_error"
+            : "server_error",
+        code: mode === "stream-incomplete"
+          ? "stream_incomplete"
+          : mode === "rate-limit"
+            ? "rate_limit_exceeded"
+            : mode === "operation-in-progress" || mode === "owner-fallback"
+              ? "upstream_unavailable"
+              : "temporary_backend_failure",
+        message: mode === "owner-fallback"
+          ? "Previous response owner account is unavailable; retry later."
+          : mode === "operation-in-progress"
+            ? "The previous response operation may still be running; retry after the cooldown."
+            : mode === "stream-incomplete"
+              ? "Suppressed duplicate side-effect tool call; upstream response cannot be continued safely."
+              : "Temporary server failure"
+      };
+      if (mode === "owner-fallback")
+        delete error.type;
+      emit(mode === "top-level-server-error"
+        ? { type: "error", error }
+        : { type: "response.failed", response: { status: "failed", error } });
+      return;
+    }
+    if (mode === "repeated-server-error") {
       emit({
         type: "response.failed",
         response: {
           status: "failed",
-          error: {
-            code: "previous_response_owner_unavailable",
-            message: "Previous response owner account is unavailable; retry later."
-          }
+          error: { type: "server_error", code: "temporary_backend_failure", message: "Still failing" }
         }
       });
       return;
@@ -105,9 +134,9 @@ for await (const event of stream(model, context, options)) {
   events.push(event);
 }
 
-if (mode === "recover") {
-  assert.equal(sockets.length, 2, "owner loss should open one replacement WebSocket");
-  assert.equal(sentBodies.length, 2, "owner loss should retry exactly once");
+if (recoveryModes.has(mode)) {
+  assert.equal(sockets.length, 2, `${mode} should open one replacement WebSocket`);
+  assert.equal(sentBodies.length, 2, `${mode} should retry exactly once`);
   assert.notEqual(sockets[0].headers["session-id"], sockets[1].headers["session-id"]);
   assert.equal(sentBodies[0].previous_response_id, undefined);
   assert.equal(sentBodies[1].previous_response_id, undefined);
@@ -115,6 +144,10 @@ if (mode === "recover") {
   assert.equal(sentBodies[1].prompt_cache_key, sockets[1].headers["session-id"]);
   assert.equal(events.at(-1)?.type, "done");
   assert.equal(events.at(-1)?.message?.responseId, "resp_recovered");
+} else if (boundedRetryModes.has(mode)) {
+  assert.equal(sockets.length, 2, `${mode} must stop after one replacement WebSocket`);
+  assert.equal(sentBodies.length, 2, `${mode} must stop after one retry`);
+  assert.equal(events.at(-1)?.type, "error");
 } else {
   assert.equal(sockets.length, 1, `${mode} must not open a replacement WebSocket`);
   assert.equal(sentBodies.length, 1, `${mode} must not retry`);

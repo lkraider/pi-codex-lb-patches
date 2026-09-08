@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Idempotently patch Pi's Codex provider to recover from codex-lb owner loss."""
+"""Patch Pi's Codex provider for safe transient server-error recovery."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-PATCH_MARKER = "PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE"
+PATCH_MARKER = "isRetryableCodexServerError"
+LEGACY_PATCH_MARKER = "isPreviousResponseOwnerUnavailableError"
 COMMON_PATCH_MARKERS = (
     "originalCacheSessionId",
-    "retriedPreviousResponseOwnerUnavailable",
-    "isPreviousResponseOwnerUnavailableError",
+    "retriedCodexServerError",
+    "codexApiErrorType",
+    "isRetryableCodexServerError",
     "codexSessionAliases",
     "closeWebSocketSessionEntries",
 )
@@ -20,9 +22,10 @@ def is_complete_patch(text: str, kind: str) -> bool:
     if PATCH_MARKER not in text:
         return False
     output_guard = "output.content.length === 0" if kind == "readable" else "output.content.length===0"
-    missing = [marker for marker in (*COMMON_PATCH_MARKERS, output_guard) if marker not in text]
+    rate_limit_guard = 'error.code === "rate_limit_exceeded"' if kind == "readable" else 'error.code==="rate_limit_exceeded"'
+    missing = [marker for marker in (*COMMON_PATCH_MARKERS, output_guard, rate_limit_guard) if marker not in text]
     if missing:
-        raise RuntimeError(f"{kind}: partial owner-failover patch; missing {', '.join(missing)}")
+        raise RuntimeError(f"{kind}: partial transient-recovery patch; missing {', '.join(missing)}")
     return True
 
 
@@ -32,15 +35,73 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
         raise RuntimeError(f"{label}: expected one upstream marker, found {count}")
     return text.replace(old, new, 1)
 
+READABLE_SERVER_ERROR_CLASSIFIER = '''function codexApiErrorType(error) {
+    const payload = error.payload;
+    if (!payload || typeof payload !== "object")
+        return undefined;
+    const errorType = payload.type === "response.failed"
+        ? payload.response?.error?.type
+        : payload.type === "error" && payload.error && typeof payload.error === "object"
+            ? payload.error.type
+            : undefined;
+    return typeof errorType === "string" ? errorType : undefined;
+}
+function isRetryableCodexServerError(error) {
+    if (!(error instanceof CodexApiError))
+        return false;
+    if (error.code === PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE || error.code === "rate_limit_exceeded" ||
+        /Previous response owner account is unavailable/i.test(error.message))
+        return true;
+    if (error.code === "stream_incomplete" || error.code === "previous_response_operation_in_progress" ||
+        /previous response operation may still be running|Suppressed duplicate side-effect tool call/i.test(error.message))
+        return false;
+    return codexApiErrorType(error) === "server_error";
+}'''
+
+MINIFIED_SERVER_ERROR_CLASSIFIER = 'function codexApiErrorType(error){let payload=error.payload;if(!payload||typeof payload!=="object")return;let errorType=payload.type==="response.failed"?payload.response?.error?.type:payload.type==="error"&&payload.error&&typeof payload.error==="object"?payload.error.type:void 0;return typeof errorType==="string"?errorType:void 0}function isRetryableCodexServerError(error){return error instanceof CodexApiError?error.code===PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE||error.code==="rate_limit_exceeded"||/Previous response owner account is unavailable/i.test(error.message)?!0:error.code==="stream_incomplete"||error.code==="previous_response_operation_in_progress"||/previous response operation may still be running|Suppressed duplicate side-effect tool call/i.test(error.message)?!1:codexApiErrorType(error)==="server_error":!1}'
+
+
+def migrate_legacy_patch(text: str, kind: str) -> str:
+    if LEGACY_PATCH_MARKER not in text:
+        return text
+    text = text.replace("retriedPreviousResponseOwnerUnavailable", "retriedCodexServerError")
+    text = text.replace("previousResponseOwnerUnavailable", "retryableCodexServerError")
+    text = text.replace("isPreviousResponseOwnerUnavailableError", "isRetryableCodexServerError")
+    if kind == "readable":
+        old = '''function isRetryableCodexServerError(error) {
+    return error instanceof CodexApiError &&
+        (error.code === PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE ||
+            /Previous response owner account is unavailable/i.test(error.message));
+}'''
+        new = READABLE_SERVER_ERROR_CLASSIFIER
+    else:
+        old = 'function isRetryableCodexServerError(error){return error instanceof CodexApiError&&(error.code===PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE||/Previous response owner account is unavailable/i.test(error.message))}'
+        new = MINIFIED_SERVER_ERROR_CLASSIFIER
+    return replace_once(text, old, new, f"{kind} legacy classifier migration")
+
+
+def upgrade_generic_patch(text: str, kind: str) -> str:
+    if PATCH_MARKER not in text:
+        return text
+    if kind == "readable" and 'error.code === "rate_limit_exceeded"' not in text:
+        return replace_once(
+            text,
+            "error.code === PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE ||\n        /Previous response owner account",
+            'error.code === PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE || error.code === "rate_limit_exceeded" ||\n        /Previous response owner account',
+            "readable rate-limit upgrade",
+        )
+    if kind == "bundle" and 'error.code==="rate_limit_exceeded"' not in text:
+        return replace_once(
+            text,
+            "error.code===PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE||/Previous response owner account",
+            'error.code===PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE||error.code==="rate_limit_exceeded"||/Previous response owner account',
+            "bundle rate-limit upgrade",
+        )
+    return text
+
 
 def patch_readable(text: str) -> str:
-    if PATCH_MARKER in text and "output.content.length === 0" not in text:
-        text = replace_once(
-            text,
-            "!retriedPreviousResponseOwnerUnavailable &&\n                            originalCacheSessionId",
-            "!retriedPreviousResponseOwnerUnavailable &&\n                            output.content.length === 0 && originalCacheSessionId",
-            "readable output-safety upgrade",
-        )
+    text = upgrade_generic_patch(migrate_legacy_patch(text, "readable"), "readable")
     if is_complete_patch(text, "readable"):
         return text
 
@@ -82,7 +143,7 @@ def patch_readable(text: str) -> str:
         text,
         "                let retriedMissingWebSocketContinuation = false;",
         "                let retriedMissingWebSocketContinuation = false;\n"
-        "                let retriedPreviousResponseOwnerUnavailable = false;",
+        "                let retriedCodexServerError = false;",
         "readable retry flag",
     )
     text = replace_once(
@@ -90,8 +151,8 @@ def patch_readable(text: str) -> str:
         '''                        const previousResponseNotFound = isPreviousResponseNotFoundError(error);
                         if (!aborted && previousResponseNotFound && !retriedMissingWebSocketContinuation) {''',
         '''                        const previousResponseNotFound = isPreviousResponseNotFoundError(error);
-                        const previousResponseOwnerUnavailable = isPreviousResponseOwnerUnavailableError(error);
-                        if (!aborted && previousResponseOwnerUnavailable && !retriedPreviousResponseOwnerUnavailable &&
+                        const retryableCodexServerError = isRetryableCodexServerError(error);
+                        if (!aborted && retryableCodexServerError && !retriedCodexServerError &&
                             output.content.length === 0 && originalCacheSessionId && body.previous_response_id == null) {
                             const previousCodexSessionId = codexSessionId;
                             cacheSessionId = rotateCodexSessionAlias(originalCacheSessionId, cacheSessionId);
@@ -103,11 +164,11 @@ def patch_readable(text: str) -> str:
                             sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, codexSessionId);
                             websocketHeaders = buildWebSocketHeaders(model.headers, options?.headers, accountId, apiKey, websocketRequestId);
                             bodyJson = JSON.stringify(body);
-                            retriedPreviousResponseOwnerUnavailable = true;
+                            retriedCodexServerError = true;
                             continue;
                         }
                         if (!aborted && previousResponseNotFound && !retriedMissingWebSocketContinuation) {''',
-        "readable owner retry",
+        "readable server-error retry",
     )
     text = replace_once(
         text,
@@ -117,12 +178,8 @@ def patch_readable(text: str) -> str:
         '''function isPreviousResponseNotFoundError(error) {
     return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
 }
-function isPreviousResponseOwnerUnavailableError(error) {
-    return error instanceof CodexApiError &&
-        (error.code === PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE ||
-            /Previous response owner account is unavailable/i.test(error.message));
-}''',
-        "readable owner classifier",
+''' + READABLE_SERVER_ERROR_CLASSIFIER,
+        "readable server-error classifier",
     )
     text = replace_once(
         text,
@@ -199,13 +256,7 @@ export function closeOpenAICodexWebSocketSessions(sessionId) {
 
 
 def patch_minified(text: str) -> str:
-    if PATCH_MARKER in text and "output.content.length===0" not in text:
-        text = replace_once(
-            text,
-            "!retriedPreviousResponseOwnerUnavailable&&originalCacheSessionId",
-            "!retriedPreviousResponseOwnerUnavailable&&output.content.length===0&&originalCacheSessionId",
-            "bundle output-safety upgrade",
-        )
+    text = upgrade_generic_patch(migrate_legacy_patch(text, "bundle"), "bundle")
     if is_complete_patch(text, "bundle"):
         return text
 
@@ -225,20 +276,20 @@ def patch_minified(text: str) -> str:
     text = replace_once(
         text,
         'retriedMissingWebSocketContinuation=!1;for(;;)',
-        'retriedMissingWebSocketContinuation=!1,retriedPreviousResponseOwnerUnavailable=!1;for(;;)',
+        'retriedMissingWebSocketContinuation=!1,retriedCodexServerError=!1;for(;;)',
         "bundle retry flag",
     )
     text = replace_once(
         text,
         'previousResponseNotFound=isPreviousResponseNotFoundError(error);if(!aborted&&previousResponseNotFound&&!retriedMissingWebSocketContinuation)',
-        'previousResponseNotFound=isPreviousResponseNotFoundError(error),previousResponseOwnerUnavailable=isPreviousResponseOwnerUnavailableError(error);if(!aborted&&previousResponseOwnerUnavailable&&!retriedPreviousResponseOwnerUnavailable&&output.content.length===0&&originalCacheSessionId&&body.previous_response_id==null){let previousCodexSessionId=codexSessionId;cacheSessionId=rotateCodexSessionAlias(originalCacheSessionId,cacheSessionId),codexSessionId=clampOpenAIPromptCacheKey(cacheSessionId),body.prompt_cache_key===previousCodexSessionId&&(body={...body,prompt_cache_key:codexSessionId}),websocketRequestId=codexSessionId||uuidv7(),sseHeaders=buildSSEHeaders(model.headers,options?.headers,accountId,apiKey,codexSessionId),websocketHeaders=buildWebSocketHeaders(model.headers,options?.headers,accountId,apiKey,websocketRequestId),bodyJson=JSON.stringify(body),retriedPreviousResponseOwnerUnavailable=!0;continue}if(!aborted&&previousResponseNotFound&&!retriedMissingWebSocketContinuation)',
-        "bundle owner retry",
+        'previousResponseNotFound=isPreviousResponseNotFoundError(error),retryableCodexServerError=isRetryableCodexServerError(error);if(!aborted&&retryableCodexServerError&&!retriedCodexServerError&&output.content.length===0&&originalCacheSessionId&&body.previous_response_id==null){let previousCodexSessionId=codexSessionId;cacheSessionId=rotateCodexSessionAlias(originalCacheSessionId,cacheSessionId),codexSessionId=clampOpenAIPromptCacheKey(cacheSessionId),body.prompt_cache_key===previousCodexSessionId&&(body={...body,prompt_cache_key:codexSessionId}),websocketRequestId=codexSessionId||uuidv7(),sseHeaders=buildSSEHeaders(model.headers,options?.headers,accountId,apiKey,codexSessionId),websocketHeaders=buildWebSocketHeaders(model.headers,options?.headers,accountId,apiKey,websocketRequestId),bodyJson=JSON.stringify(body),retriedCodexServerError=!0;continue}if(!aborted&&previousResponseNotFound&&!retriedMissingWebSocketContinuation)',
+        "bundle server-error retry",
     )
     text = replace_once(
         text,
         'function isPreviousResponseNotFoundError(error){return error instanceof CodexApiError&&error.code===PREVIOUS_RESPONSE_NOT_FOUND_CODE}',
-        'function isPreviousResponseNotFoundError(error){return error instanceof CodexApiError&&error.code===PREVIOUS_RESPONSE_NOT_FOUND_CODE}function isPreviousResponseOwnerUnavailableError(error){return error instanceof CodexApiError&&(error.code===PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE||/Previous response owner account is unavailable/i.test(error.message))}',
-        "bundle owner classifier",
+        'function isPreviousResponseNotFoundError(error){return error instanceof CodexApiError&&error.code===PREVIOUS_RESPONSE_NOT_FOUND_CODE}' + MINIFIED_SERVER_ERROR_CLASSIFIER,
+        "bundle server-error classifier",
     )
     text = replace_once(
         text,

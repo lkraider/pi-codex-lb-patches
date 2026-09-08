@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Reapply Pi's codex-lb previous-response owner failover workaround.
+# Reapply Pi's safe Codex transient server-error recovery workaround.
 #
 # Usage:
-#   ./reapply-codex-owner-failover.sh
-#   ./reapply-codex-owner-failover.sh /path/to/@earendil-works/pi-coding-agent
+#   ./reapply-codex-transient-recovery.sh
+#   ./reapply-codex-transient-recovery.sh /path/to/@earendil-works/pi-coding-agent
 #
 # Run after every `pi update`, reinstall, or asdf Node version change.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PATCHER="$SCRIPT_DIR/patch-codex-owner-failover.py"
+PATCHER="$SCRIPT_DIR/patch-codex-transient-recovery.py"
 PKG="${1:-$(npm root -g)/@earendil-works/pi-coding-agent}"
 
 if [[ ! -d "$PKG" ]]; then
@@ -40,17 +40,17 @@ echo "Patching: $PKG"
 echo "Bundle chunk: $(basename "$CHUNK")"
 python3 "$PATCHER" "${ARGS[@]}"
 
-grep -q 'PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE' "$CHUNK" || {
-  echo "ERROR: owner-failover marker missing from CLI bundle." >&2
+grep -q 'isRetryableCodexServerError' "$CHUNK" || {
+  echo "ERROR: transient-recovery marker missing from CLI bundle." >&2
   exit 1
 }
 node --check "$CHUNK"
 if [[ -f "$API" ]]; then
-  grep -q 'PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE' "$API" || {
-    echo "ERROR: owner-failover marker missing from pi-ai dist copy." >&2
+  grep -q 'isRetryableCodexServerError' "$API" || {
+    echo "ERROR: transient-recovery marker missing from pi-ai dist copy." >&2
     exit 1
   }
   node --check "$API"
 fi
 
-echo "Done: owner-unavailable affinity rotation is patched and syntax-valid."
+echo "Done: transient server-error recovery is patched and syntax-valid."
