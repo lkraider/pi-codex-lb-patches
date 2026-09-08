@@ -4,7 +4,7 @@ Readable, local patches for Pi's bearer-token proxy and Codex retry gaps, plus c
 
 ## Changes
 
-The three changes remain separate under `patches/`:
+The changes remain separate under `patches/`:
 
 - `bearer-auth.patch` addresses Pi issue [#5152](https://github.com/earendil-works/pi/issues/5152) by accepting opaque bearer keys while preserving ChatGPT account headers for JWTs.
 - `transient-retry.patch` addresses Pi issue [#7444](https://github.com/earendil-works/pi/issues/7444) by retrying one `server_error` or `rate_limit_exceeded` with the same session.
@@ -80,8 +80,8 @@ A codex-lb provider can include:
 
 The test runner takes the latest Pi tarball from npm's local cache, installs dependencies offline in a temporary directory, and tests:
 
-- each patch stage and reapplication;
-- both readable and rebuilt/minified providers;
+- patch stages and reapplication;
+- readable and rebuilt/minified providers;
 - general retry and combined owner migration behavior;
 - opaque bearer authentication and fail-closed cases;
 - the rebuilt Pi CLI.
