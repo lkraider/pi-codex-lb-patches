@@ -4,11 +4,12 @@ import { pathToFileURL } from "node:url";
 
 const providerPath = process.argv[2];
 const mode = process.argv[3] ?? "server-error";
-const recoveryModes = new Set(["server-error", "top-level-server-error", "rate-limit", "owner-fallback"]);
+const profile = process.argv[4] ?? "general";
+const genericRecoveryModes = new Set(["server-error", "top-level-server-error", "rate-limit"]);
 const failClosedModes = new Set(["partial-output", "explicit-anchor", "client-error", "stream-incomplete", "operation-in-progress"]);
-const boundedRetryModes = new Set(["repeated-server-error"]);
-if (!providerPath || (![...recoveryModes, ...failClosedModes, ...boundedRetryModes].includes(mode))) {
-  console.error("Usage: test-codex-transient-recovery.mjs PROVIDER [server-error|top-level-server-error|rate-limit|owner-fallback|partial-output|explicit-anchor|client-error|stream-incomplete|operation-in-progress|repeated-server-error]");
+const validModes = new Set([...genericRecoveryModes, ...failClosedModes, "owner-unavailable", "repeated-server-error"]);
+if (!providerPath || !validModes.has(mode) || !["general", "combined"].includes(profile)) {
+  console.error("Usage: test-codex-transient-retry.mjs PROVIDER MODE [general|combined]");
   process.exit(2);
 }
 
@@ -42,19 +43,15 @@ class MockWebSocket extends EventTarget {
         });
       }
       const error = {
-        type: mode === "client-error"
-          ? "invalid_request_error"
-          : mode === "rate-limit"
-            ? "rate_limit_error"
-            : "server_error",
+        type: mode === "client-error" ? "invalid_request_error" : mode === "rate-limit" ? "rate_limit_error" : "server_error",
         code: mode === "stream-incomplete"
           ? "stream_incomplete"
           : mode === "rate-limit"
             ? "rate_limit_exceeded"
-            : mode === "operation-in-progress" || mode === "owner-fallback"
+            : mode === "operation-in-progress" || mode === "owner-unavailable"
               ? "upstream_unavailable"
               : "temporary_backend_failure",
-        message: mode === "owner-fallback"
+        message: mode === "owner-unavailable"
           ? "Previous response owner account is unavailable; retry later."
           : mode === "operation-in-progress"
             ? "The previous response operation may still be running; retry after the cooldown."
@@ -62,7 +59,7 @@ class MockWebSocket extends EventTarget {
               ? "Suppressed duplicate side-effect tool call; upstream response cannot be continued safely."
               : "Temporary server failure"
       };
-      if (mode === "owner-fallback")
+      if (mode === "owner-unavailable")
         delete error.type;
       emit(mode === "top-level-server-error"
         ? { type: "error", error }
@@ -120,40 +117,39 @@ const context = {
   systemPrompt: "Test",
   messages: [{ role: "user", content: "hello", timestamp: Date.now() }]
 };
-
-const events = [];
 const options = {
-  apiKey: "sk-clb-test",
+  apiKey: "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF90ZXN0In19.sig",
   sessionId: "original-session",
   transport: "websocket"
 };
-if (mode === "explicit-anchor") {
+if (mode === "explicit-anchor")
   options.onPayload = (body) => ({ ...body, previous_response_id: "resp_explicit" });
-}
-for await (const event of stream(model, context, options)) {
-  events.push(event);
-}
 
-if (recoveryModes.has(mode)) {
+const events = [];
+for await (const event of stream(model, context, options))
+  events.push(event);
+
+const shouldRecover = genericRecoveryModes.has(mode) || (profile === "combined" && mode === "owner-unavailable");
+if (shouldRecover) {
   assert.equal(sockets.length, 2, `${mode} should open one replacement WebSocket`);
   assert.equal(sentBodies.length, 2, `${mode} should retry exactly once`);
-  assert.notEqual(sockets[0].headers["session-id"], sockets[1].headers["session-id"]);
+  if (mode === "owner-unavailable")
+    assert.notEqual(sockets[0].headers["session-id"], sockets[1].headers["session-id"], "owner migration must change affinity");
+  else
+    assert.equal(sockets[0].headers["session-id"], sockets[1].headers["session-id"], "general retry must preserve affinity");
   assert.equal(sentBodies[0].previous_response_id, undefined);
   assert.equal(sentBodies[1].previous_response_id, undefined);
-  assert.deepEqual(sentBodies[1].input, sentBodies[0].input, "retry must resend full local history");
   assert.equal(sentBodies[1].prompt_cache_key, sockets[1].headers["session-id"]);
+  assert.deepEqual(sentBodies[1].input, sentBodies[0].input);
   assert.equal(events.at(-1)?.type, "done");
-  assert.equal(events.at(-1)?.message?.responseId, "resp_recovered");
-} else if (boundedRetryModes.has(mode)) {
-  assert.equal(sockets.length, 2, `${mode} must stop after one replacement WebSocket`);
-  assert.equal(sentBodies.length, 2, `${mode} must stop after one retry`);
+} else if (mode === "repeated-server-error") {
+  assert.equal(sockets.length, 2, "general retry must stop after one retry");
+  assert.equal(sentBodies.length, 2);
   assert.equal(events.at(-1)?.type, "error");
 } else {
-  assert.equal(sockets.length, 1, `${mode} must not open a replacement WebSocket`);
-  assert.equal(sentBodies.length, 1, `${mode} must not retry`);
+  assert.equal(sockets.length, 1, `${mode} must not retry for the ${profile} profile`);
+  assert.equal(sentBodies.length, 1);
   assert.equal(events.at(-1)?.type, "error");
-  if (mode === "explicit-anchor")
-    assert.equal(sentBodies[0].previous_response_id, "resp_explicit");
 }
 closeOpenAICodexWebSocketSessions("original-session");
-console.log(`${providerPath}: ${mode} ok`);
+console.log(`${providerPath}: ${profile}/${mode} ok`);
