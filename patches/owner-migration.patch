@@ -1,0 +1,92 @@
+--- a/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js
++++ b/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js
+@@ -168,4 +168,5 @@
+             const grammarToolInputProperties = createGrammarToolInputProperties(context.tools, model.compat?.supportsOpenAIGrammarTools ?? false);
+-            const cacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
+-            const codexSessionId = clampOpenAIPromptCacheKey(cacheSessionId);
++            const originalCacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
++            let cacheSessionId = resolveCodexSessionAlias(originalCacheSessionId);
++            let codexSessionId = clampOpenAIPromptCacheKey(cacheSessionId);
+             let body = buildRequestBody(model, context, options, codexSessionId, grammarToolInputProperties);
+@@ -175,6 +176,6 @@
+             }
+-            const websocketRequestId = codexSessionId || uuidv7();
+-            const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, codexSessionId);
+-            const websocketHeaders = buildWebSocketHeaders(model.headers, options?.headers, accountId, apiKey, websocketRequestId);
+-            const bodyJson = JSON.stringify(body);
++            let websocketRequestId = codexSessionId || uuidv7();
++            let sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, codexSessionId);
++            let websocketHeaders = buildWebSocketHeaders(model.headers, options?.headers, accountId, apiKey, websocketRequestId);
++            let bodyJson = JSON.stringify(body);
+             const httpTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
+@@ -192,2 +193,3 @@
+                 let retriedCodexServerError = false;
++                let retriedPreviousResponseOwnerUnavailable = false;
+                 while (true) {
+@@ -219,2 +221,17 @@
+                         const retryableCodexServerError = isRetryableCodexServerError(error);
++                        const previousResponseOwnerUnavailable = isPreviousResponseOwnerUnavailableError(error);
++                        if (!aborted && previousResponseOwnerUnavailable && !retriedPreviousResponseOwnerUnavailable &&
++                            output.content.length === 0 && originalCacheSessionId && body.previous_response_id == null) {
++                            const previousCodexSessionId = codexSessionId;
++                            cacheSessionId = rotateCodexSessionAlias(originalCacheSessionId, cacheSessionId);
++                            codexSessionId = clampOpenAIPromptCacheKey(cacheSessionId);
++                            if (body.prompt_cache_key === previousCodexSessionId)
++                                body = { ...body, prompt_cache_key: codexSessionId };
++                            websocketRequestId = codexSessionId || uuidv7();
++                            sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, codexSessionId);
++                            websocketHeaders = buildWebSocketHeaders(model.headers, options?.headers, accountId, apiKey, websocketRequestId);
++                            bodyJson = JSON.stringify(body);
++                            retriedPreviousResponseOwnerUnavailable = true;
++                            continue;
++                        }
+                         if (!aborted && retryableCodexServerError && !retriedCodexServerError &&
+@@ -665,2 +682,16 @@
+ const websocketSseFallbackSessions = new Set();
++const codexSessionAliases = new Map();
++function resolveCodexSessionAlias(sessionId) {
++    return sessionId ? (codexSessionAliases.get(sessionId) ?? sessionId) : undefined;
++}
++function rotateCodexSessionAlias(sessionId, failedSessionId) {
++    const currentSessionId = resolveCodexSessionAlias(sessionId);
++    if (!sessionId || !currentSessionId || currentSessionId !== failedSessionId)
++        return currentSessionId ?? failedSessionId;
++    closeWebSocketSessionEntries(failedSessionId);
++    websocketSseFallbackSessions.delete(failedSessionId);
++    const replacementSessionId = uuidv7();
++    codexSessionAliases.set(sessionId, replacementSessionId);
++    return replacementSessionId;
++}
+ function getOrCreateWebSocketDebugStats(sessionId) {
+@@ -697,3 +728,3 @@
+ }
+-export function closeOpenAICodexWebSocketSessions(sessionId) {
++function closeWebSocketSessionEntries(sessionId) {
+     const closeEntry = (entry) => {
+@@ -703,13 +734,18 @@
+     };
++    for (const entry of websocketSessionCache.get(sessionId)?.values() ?? [])
++        closeEntry(entry);
++    websocketSessionCache.delete(sessionId);
++}
++export function closeOpenAICodexWebSocketSessions(sessionId) {
+     if (sessionId) {
+-        for (const entry of websocketSessionCache.get(sessionId)?.values() ?? [])
+-            closeEntry(entry);
+-        websocketSessionCache.delete(sessionId);
++        const aliasedSessionId = codexSessionAliases.get(sessionId);
++        closeWebSocketSessionEntries(sessionId);
++        if (aliasedSessionId && aliasedSessionId !== sessionId)
++            closeWebSocketSessionEntries(aliasedSessionId);
++        codexSessionAliases.delete(sessionId);
+         return;
+     }
+-    for (const accountEntries of websocketSessionCache.values()) {
+-        for (const entry of accountEntries.values())
+-            closeEntry(entry);
+-    }
+-    websocketSessionCache.clear();
++    for (const cachedSessionId of [...websocketSessionCache.keys()])
++        closeWebSocketSessionEntries(cachedSessionId);
++    codexSessionAliases.clear();
+ }

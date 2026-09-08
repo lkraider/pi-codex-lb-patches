@@ -1,7 +1,6 @@
-diff --git a/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js b/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js
 --- a/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js
 +++ b/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js
-@@ -163,7 +163,7 @@ export const stream = (model, context, options) => {
+@@ -164,7 +164,7 @@
              if (!apiKey) {
                  throw new Error(`No API key for provider: ${model.provider}`);
              }
@@ -10,7 +9,7 @@ diff --git a/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.
              const grammarToolInputProperties = createGrammarToolInputProperties(context.tools, model.compat?.supportsOpenAIGrammarTools ?? false);
              const cacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
              const codexSessionId = clampOpenAIPromptCacheKey(cacheSessionId);
-@@ -1206,6 +1206,14 @@ function parseErrorResponse(response) {
+@@ -1244,6 +1244,14 @@
  // ============================================================================
  // Auth & Headers
  // ============================================================================
@@ -25,7 +24,7 @@ diff --git a/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.
  function extractAccountId(token) {
      try {
          const parts = token.split(".");
-@@ -1232,7 +1240,9 @@ function buildBaseCodexHeaders(initHeaders, additionalHeaders, accountId, token)
+@@ -1270,7 +1278,9 @@
          }
      }
      headers.set("Authorization", `Bearer ${token}`);
@@ -34,5 +33,5 @@ diff --git a/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.
 +        headers.set("chatgpt-account-id", accountId);
 +    }
      headers.set("originator", "pi");
-     const userAgent = _os ? `pi (${_os.platform()} ${_os.release()}; ${_os.arch()})` : "pi (browser)";
-     headers.set("User-Agent", userAgent);
+     headers.set("User-Agent", getPiUserAgent());
+     return headers;

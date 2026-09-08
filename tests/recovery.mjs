@@ -9,7 +9,7 @@ const genericRecoveryModes = new Set(["server-error", "top-level-server-error", 
 const failClosedModes = new Set(["partial-output", "explicit-anchor", "client-error", "stream-incomplete", "operation-in-progress"]);
 const validModes = new Set([...genericRecoveryModes, ...failClosedModes, "owner-unavailable", "repeated-server-error"]);
 if (!providerPath || !validModes.has(mode) || !["general", "combined"].includes(profile)) {
-  console.error("Usage: test-codex-transient-retry.mjs PROVIDER MODE [general|combined]");
+  console.error("Usage: recovery.mjs PROVIDER MODE [general|combined]");
   process.exit(2);
 }
 

@@ -1,0 +1,54 @@
+--- a/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js
++++ b/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js
+@@ -189,6 +189,7 @@
+                 let websocketStarted = false;
+                 let retriedWebSocketConnectionLimit = false;
+                 let retriedMissingWebSocketContinuation = false;
++                let retriedCodexServerError = false;
+                 while (true) {
+                     websocketStarted = false;
+                     try {
+@@ -215,6 +216,12 @@
+                         const aborted = options?.signal?.aborted;
+                         const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
+                         const previousResponseNotFound = isPreviousResponseNotFoundError(error);
++                        const retryableCodexServerError = isRetryableCodexServerError(error);
++                        if (!aborted && retryableCodexServerError && !retriedCodexServerError &&
++                            output.content.length === 0 && body.previous_response_id == null) {
++                            retriedCodexServerError = true;
++                            continue;
++                        }
+                         if (!aborted && previousResponseNotFound && !retriedMissingWebSocketContinuation) {
+                             retriedMissingWebSocketContinuation = true;
+                             continue;
+@@ -509,6 +516,30 @@
+ function isPreviousResponseNotFoundError(error) {
+     return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
+ }
++function codexApiErrorType(error) {
++    const payload = error.payload;
++    if (!payload || typeof payload !== "object")
++        return undefined;
++    const errorType = payload.type === "response.failed"
++        ? payload.response?.error?.type
++        : payload.type === "error" && payload.error && typeof payload.error === "object"
++            ? payload.error.type
++            : undefined;
++    return typeof errorType === "string" ? errorType : undefined;
++}
++function isPreviousResponseOwnerUnavailableError(error) {
++    return error instanceof CodexApiError &&
++        (error.code === "previous_response_owner_unavailable" ||
++            /Previous response owner account is unavailable/i.test(error.message));
++}
++function isRetryableCodexServerError(error) {
++    if (!(error instanceof CodexApiError) || isPreviousResponseOwnerUnavailableError(error))
++        return false;
++    if (error.code === "stream_incomplete" || error.code === "previous_response_operation_in_progress" ||
++        /previous response operation may still be running|Suppressed duplicate side-effect tool call/i.test(error.message))
++        return false;
++    return error.code === "rate_limit_exceeded" || codexApiErrorType(error) === "server_error";
++}
+ function extractCodexEventError(event) {
+     const nested = event.error && typeof event.error === "object" ? event.error : undefined;
+     return {

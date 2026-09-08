@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+package_dir="${PI_CODING_AGENT_DIR:-}"
+
+usage() {
+  cat <<'EOF'
+Usage: ./reapply [--package DIR]
+
+Apply all readable Pi patches and rebuild the minified bundle.
+Defaults to the globally installed @earendil-works/pi-coding-agent package.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --package)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      package_dir=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$package_dir" ]]; then
+  package_dir="$(npm root -g)/@earendil-works/pi-coding-agent"
+fi
+package_dir=$(cd "$package_dir" 2>/dev/null && pwd) || {
+  echo "Pi package directory not found: $package_dir" >&2
+  exit 1
+}
+
+package_name=$(node -p 'require(process.argv[1]).name' "$package_dir/package.json" 2>/dev/null || true)
+if [[ "$package_name" != "@earendil-works/pi-coding-agent" ]]; then
+  echo "Not a Pi coding-agent package: $package_dir" >&2
+  exit 1
+fi
+
+"$root_dir/src/apply-patch.sh" "$package_dir" "$root_dir/patches/bearer-auth.patch" \
+  'function tryExtractAccountId('
+"$root_dir/src/apply-patch.sh" "$package_dir" "$root_dir/patches/transient-retry.patch" \
+  'function isRetryableCodexServerError('
+"$root_dir/src/apply-patch.sh" "$package_dir" "$root_dir/patches/owner-migration.patch" \
+  'const codexSessionAliases = new Map();'
+
+provider="$package_dir/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js"
+node --check "$provider"
+node "$root_dir/src/rebuild-bundle.mjs" "$package_dir"
+node --check "$package_dir/dist/bundle/cli.js"
+
+grep -RFlq 'codexSessionAliases' "$package_dir/dist/bundle/chunks" || {
+  echo "Rebuilt bundle does not contain the owner-migration patch" >&2
+  exit 1
+}
+
+printf 'Patched Pi at %s\nRestart existing Pi processes to load it.\n' "$package_dir"
