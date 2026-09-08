@@ -52,7 +52,7 @@ This is narrower than retrying every unknown Codex error. In particular, it does
 - `patch-codex-transient-recovery.py` applies guarded transformations to the minified CLI bundle and readable `pi-ai` distribution.
 - `test-codex-transient-recovery.mjs` exercises recovery and fail-closed cases with a mock WebSocket.
 
-The bearer-auth workaround remains independent in `reapply-codex-bearer-auth.sh`. The patcher automatically upgrades the earlier owner-only workaround if it is already installed.
+The bearer-auth workaround remains independent in `reapply-codex-bearer-auth.sh`. If an older recovery patch is installed, reinstall clean upstream Pi first, then run this patcher.
 
 ## Apply
 

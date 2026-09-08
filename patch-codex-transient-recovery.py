@@ -7,7 +7,6 @@ import argparse
 from pathlib import Path
 
 PATCH_MARKER = "isRetryableCodexServerError"
-LEGACY_PATCH_MARKER = "isPreviousResponseOwnerUnavailableError"
 COMMON_PATCH_MARKERS = (
     "originalCacheSessionId",
     "retriedCodexServerError",
@@ -60,48 +59,7 @@ function isRetryableCodexServerError(error) {
 
 MINIFIED_SERVER_ERROR_CLASSIFIER = 'function codexApiErrorType(error){let payload=error.payload;if(!payload||typeof payload!=="object")return;let errorType=payload.type==="response.failed"?payload.response?.error?.type:payload.type==="error"&&payload.error&&typeof payload.error==="object"?payload.error.type:void 0;return typeof errorType==="string"?errorType:void 0}function isRetryableCodexServerError(error){return error instanceof CodexApiError?error.code===PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE||error.code==="rate_limit_exceeded"||/Previous response owner account is unavailable/i.test(error.message)?!0:error.code==="stream_incomplete"||error.code==="previous_response_operation_in_progress"||/previous response operation may still be running|Suppressed duplicate side-effect tool call/i.test(error.message)?!1:codexApiErrorType(error)==="server_error":!1}'
 
-
-def migrate_legacy_patch(text: str, kind: str) -> str:
-    if LEGACY_PATCH_MARKER not in text:
-        return text
-    text = text.replace("retriedPreviousResponseOwnerUnavailable", "retriedCodexServerError")
-    text = text.replace("previousResponseOwnerUnavailable", "retryableCodexServerError")
-    text = text.replace("isPreviousResponseOwnerUnavailableError", "isRetryableCodexServerError")
-    if kind == "readable":
-        old = '''function isRetryableCodexServerError(error) {
-    return error instanceof CodexApiError &&
-        (error.code === PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE ||
-            /Previous response owner account is unavailable/i.test(error.message));
-}'''
-        new = READABLE_SERVER_ERROR_CLASSIFIER
-    else:
-        old = 'function isRetryableCodexServerError(error){return error instanceof CodexApiError&&(error.code===PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE||/Previous response owner account is unavailable/i.test(error.message))}'
-        new = MINIFIED_SERVER_ERROR_CLASSIFIER
-    return replace_once(text, old, new, f"{kind} legacy classifier migration")
-
-
-def upgrade_generic_patch(text: str, kind: str) -> str:
-    if PATCH_MARKER not in text:
-        return text
-    if kind == "readable" and 'error.code === "rate_limit_exceeded"' not in text:
-        return replace_once(
-            text,
-            "error.code === PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE ||\n        /Previous response owner account",
-            'error.code === PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE || error.code === "rate_limit_exceeded" ||\n        /Previous response owner account',
-            "readable rate-limit upgrade",
-        )
-    if kind == "bundle" and 'error.code==="rate_limit_exceeded"' not in text:
-        return replace_once(
-            text,
-            "error.code===PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE||/Previous response owner account",
-            'error.code===PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE||error.code==="rate_limit_exceeded"||/Previous response owner account',
-            "bundle rate-limit upgrade",
-        )
-    return text
-
-
 def patch_readable(text: str) -> str:
-    text = upgrade_generic_patch(migrate_legacy_patch(text, "readable"), "readable")
     if is_complete_patch(text, "readable"):
         return text
 
@@ -256,7 +214,6 @@ export function closeOpenAICodexWebSocketSessions(sessionId) {
 
 
 def patch_minified(text: str) -> str:
-    text = upgrade_generic_patch(migrate_legacy_patch(text, "bundle"), "bundle")
     if is_complete_patch(text, "bundle"):
         return text
 
