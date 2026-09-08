@@ -26,7 +26,6 @@ Retries fail closed after output starts, with an explicit `previous_response_id`
 Start with a clean upstream Pi installation, then run:
 
 ```sh
-cd ~/Desktop/gen-ai/pi-agent-patch
 ./reapply
 ```
 
