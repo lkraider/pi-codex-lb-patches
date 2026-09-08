@@ -21,7 +21,7 @@
                          if (!aborted && previousResponseNotFound && !retriedMissingWebSocketContinuation) {
                              retriedMissingWebSocketContinuation = true;
                              continue;
-@@ -509,6 +516,30 @@
+@@ -509,6 +516,33 @@
  function isPreviousResponseNotFoundError(error) {
      return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
  }
@@ -39,13 +39,16 @@
 +function isPreviousResponseOwnerUnavailableError(error) {
 +    return error instanceof CodexApiError &&
 +        (error.code === "previous_response_owner_unavailable" ||
-+            /Previous response owner account is unavailable/i.test(error.message));
++            error.code === "previous_response_operation_in_progress" ||
++            /Previous response owner account is unavailable/i.test(error.message) ||
++            /previous response operation may still be running/i.test(error.message) ||
++            /HTTP responses session bridge is cooling down/i.test(error.message));
 +}
 +function isRetryableCodexServerError(error) {
 +    if (!(error instanceof CodexApiError) || isPreviousResponseOwnerUnavailableError(error))
 +        return false;
-+    if (error.code === "stream_incomplete" || error.code === "previous_response_operation_in_progress" ||
-+        /previous response operation may still be running|Suppressed duplicate side-effect tool call/i.test(error.message))
++    if (error.code === "stream_incomplete" || 
++        /Suppressed duplicate side-effect tool call/i.test(error.message))
 +        return false;
 +    return error.code === "rate_limit_exceeded" || codexApiErrorType(error) === "server_error";
 +}
