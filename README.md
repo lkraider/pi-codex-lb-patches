@@ -1,13 +1,13 @@
 # Pi codex-lb patches
 
-Readable, local patches for Pi issue [#7444](https://github.com/earendil-works/pi/issues/7444) and codex-lb account failover.
+Readable, local patches for Pi's bearer-token proxy and Codex retry gaps, plus codex-lb account failover.
 
 ## Changes
 
 The three changes remain separate under `patches/`:
 
-- `bearer-auth.patch` accepts opaque bearer keys while preserving ChatGPT account headers for JWTs.
-- `transient-retry.patch` retries one `server_error` or `rate_limit_exceeded` with the same session.
+- `bearer-auth.patch` addresses Pi issue [#5152](https://github.com/earendil-works/pi/issues/5152) by accepting opaque bearer keys while preserving ChatGPT account headers for JWTs.
+- `transient-retry.patch` addresses Pi issue [#7444](https://github.com/earendil-works/pi/issues/7444) by retrying one `server_error` or `rate_limit_exceeded` with the same session.
 - `owner-migration.patch` handles `Previous response owner account is unavailable; retry later.` by rotating session affinity and resending history. It is layered after the transient retry patch.
 
 Retries fail closed after output starts, with an explicit `previous_response_id`, when the prior operation may still be running, or when duplicate side effects are possible.
